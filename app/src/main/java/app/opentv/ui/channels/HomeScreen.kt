@@ -8,6 +8,8 @@ package app.opentv.ui.channels
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -65,9 +67,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
-import android.content.Intent
 import android.view.WindowManager
 import android.widget.Toast
+import app.opentv.player.ExternalPlayer
 import androidx.compose.ui.window.Dialog
 import app.opentv.R
 import app.opentv.core.AppSettings
@@ -222,15 +224,25 @@ fun HomeScreen(
     // cuts the recording and can get a single-connection account banned. So every jump to full-screen
     // live is funnelled through [requestLive]: with a recording active it asks first.
     var pendingLiveChannel by remember { mutableStateOf<Channel?>(null) }
-    fun startLive(channel: Channel) {
+    var pendingInApp by remember { mutableStateOf(false) }
+    val externalDefault by settings.externalPlayerDefault.collectAsState()
+    // inApp = true forces OpenTV's own player even when the "external player" setting is on (the
+    // menu's "Watch in OpenTV"). Otherwise the setting decides.
+    fun startLive(channel: Channel, inApp: Boolean = false) {
+        if (externalDefault && !inApp) {
+            previewController.stop()
+            recordScope.launch { ExternalPlayer.play(context, channel, chooser = false) }
+            return
+        }
         PlaybackQueue.items = rows.map {
-            PlaybackQueue.Item(it.primary.id, it.primary.shownName, it.primary.logoUrl, it.primary.number)
+            PlaybackQueue.Item(it.primary.id, it.shownName, it.primary.logoUrl, it.primary.number)
         }
         previewController.stop()
         onPlayChannel(channel)
     }
-    fun requestLive(channel: Channel) {
-        if (activeRecordings.isNotEmpty()) pendingLiveChannel = channel else startLive(channel)
+    fun requestLive(channel: Channel, inApp: Boolean = false) {
+        pendingInApp = inApp
+        if (activeRecordings.isNotEmpty()) pendingLiveChannel = channel else startLive(channel, inApp)
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -283,7 +295,7 @@ fun HomeScreen(
         previewController.play(
             PlayerController.Request(
                 url = channel.streamUrl,
-                title = channel.shownName,
+                title = row.shownName,
                 userAgent = source?.userAgent ?: "OpenTV/0.1 (Android)",
                 isLive = true,
             ),
@@ -368,6 +380,16 @@ fun HomeScreen(
                         label = group.label,
                         selected = groupSelected,
                         onClick = { viewModel.selectCategory(group.key) },
+                        // Long-press (hold OK on a remote) switches the whole category off, to
+                        // declutter ones you never watch. Back on via Channel manager or the phone.
+                        onLongClick = {
+                            viewModel.setCategoryOff(group, true)
+                            Toast.makeText(
+                                context,
+                                context.getString(R.string.guide_category_hidden_toast, group.label),
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        },
                         modifier = if (groupSelected) Modifier.focusRequester(railFocusRequester) else Modifier,
                     )
                 }
@@ -405,7 +427,7 @@ fun HomeScreen(
                         Toast.makeText(context, context.getString(R.string.rec_recording_stopped), Toast.LENGTH_SHORT).show()
                     } else {
                         recordScope.launch { graph.recordingEngine.startChannel(row.primary, row.now) }
-                        Toast.makeText(context, context.getString(R.string.rec_recording_started_see_tab, row.primary.shownName), Toast.LENGTH_LONG).show()
+                        Toast.makeText(context, context.getString(R.string.rec_recording_started_see_tab, row.shownName), Toast.LENGTH_LONG).show()
                         promptBackgroundIfNeeded()
                     }
                 }
@@ -452,9 +474,10 @@ fun HomeScreen(
                     ChannelList(
                         rows = rows,
                         selectedKey = highlightedRow?.key,
-                        onSelectRow = { row -> channelMenu = row },
+                        // OK / tap plays; long-press (hold OK) opens the channel menu.
+                        onSelectRow = { row -> requestLive(row.primary) },
+                        onLongPressRow = { row -> channelMenu = row },
                         onFocusRow = onFocusChannel,
-                        onToggleFavourite = { viewModel.toggleFavourite(it) },
                         onExitLeftFromChannel = onExitLeftChannel,
                         modifier = Modifier.weight(1f).padding(start = 12.dp, end = 12.dp),
                     )
@@ -464,12 +487,12 @@ fun HomeScreen(
                         windowStartMillis = windowStart,
                         dayOffset = guideDayOffset,
                         selectedKey = highlightedRow?.key,
-                        // OK on a channel opens its menu: Watch, Record now, Schedule a later show,
-                        // Record series. The preview already follows the highlight as you browse.
-                        onSelectRow = { row -> channelMenu = row },
+                        // OK on a channel plays it; holding OK opens its menu: Watch, Favourite,
+                        // Record now, Schedule a later show, Record series.
+                        onSelectRow = { row -> requestLive(row.primary) },
+                        onLongPressRow = { row -> channelMenu = row },
                         onFocusRow = onFocusChannel,
                         onProgramme = { row, programme -> recordTarget = row to programme },
-                        onToggleFavourite = { viewModel.toggleFavourite(it) },
                         onExitLeftFromChannel = onExitLeftChannel,
                         modifier = Modifier.weight(1f).padding(start = 12.dp, end = 12.dp),
                     )
@@ -515,7 +538,7 @@ fun HomeScreen(
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "${formatTime(programme.startUtcMillis)}–${formatTime(programme.endUtcMillis)}   ${channel.shownName}",
+                    "${formatTime(programme.startUtcMillis)}–${formatTime(programme.endUtcMillis)}   ${targetRow.shownName}",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -568,7 +591,7 @@ fun HomeScreen(
                     }
                     liveNow -> RecordActionRow(stringResource(R.string.rec_record_now), primary = true) {
                         recordScope.launch { graph.recordingEngine.startChannel(chosenVariant, programme) }
-                        Toast.makeText(context, context.getString(R.string.rec_recording_channel, channel.shownName), Toast.LENGTH_LONG).show()
+                        Toast.makeText(context, context.getString(R.string.rec_recording_channel, targetRow.shownName), Toast.LENGTH_LONG).show()
                         promptBackgroundIfNeeded()
                         recordTarget = null
                     }
@@ -584,7 +607,7 @@ fun HomeScreen(
                                 onPlayCatchup(
                                     "catchup:${channel.id}:${programme.startUtcMillis}",
                                     url,
-                                    "${channel.shownName} — ${programme.title}",
+                                    "${targetRow.shownName} — ${programme.title}",
                                     source.userAgent,
                                 )
                             }
@@ -675,14 +698,14 @@ fun HomeScreen(
                 RecordActionRow(stringResource(R.string.rec_live_warn_watch)) {
                     pendingLiveChannel = null
                     activeRecordings.forEach { graph.recordingEngine.stop(it.id) }
-                    startLive(liveChannel)
+                    startLive(liveChannel, pendingInApp)
                 }
                 RecordActionRow(stringResource(R.string.rec_live_warn_keep)) { pendingLiveChannel = null }
             }
         }
     }
 
-    // The channel menu — opened by pressing OK on a channel. Watch, record what's on now, schedule
+    // The channel menu — opened by long-pressing (holding OK on) a channel. Watch, record what's on now, schedule
     // a later programme, or record the whole series. A plain vertical list, so it's reliable on any
     // remote — no fiddly timeline navigation needed.
     channelMenu?.let { menuRow ->
@@ -699,7 +722,7 @@ fun HomeScreen(
                     .padding(20.dp),
             ) {
                 Text(
-                    channel.shownName,
+                    menuRow.shownName,
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
@@ -720,30 +743,31 @@ fun HomeScreen(
                     Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    RecordActionRow(stringResource(R.string.guide_watch)) {
+                    RecordActionRow(
+                        stringResource(if (externalDefault) R.string.guide_watch_in_app else R.string.guide_watch),
+                    ) {
                         channelMenu = null
-                        requestLive(channel)
+                        requestLive(channel, inApp = true)
                     }
                     RecordActionRow(stringResource(R.string.guide_open_external)) {
                         channelMenu = null
-                        recordScope.launch {
-                            val ua = graph.sourceRepository.byId(channel.sourceId)?.userAgent ?: "OpenTV/0.1 (Android)"
-                            val intent = Intent(Intent.ACTION_VIEW).apply {
-                                setDataAndType(android.net.Uri.parse(channel.streamUrl), "video/*")
-                                putExtra("title", channel.shownName)
-                                // MX Player / VLC read the User-Agent from this header extra.
-                                putExtra("headers", arrayOf("User-Agent", ua))
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            runCatching {
-                                context.startActivity(
-                                    Intent.createChooser(intent, context.getString(R.string.guide_play_channel_with))
-                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                                )
-                            }.onFailure {
-                                Toast.makeText(context, context.getString(R.string.guide_no_external_player), Toast.LENGTH_SHORT).show()
-                            }
-                        }
+                        previewController.stop()
+                        recordScope.launch { ExternalPlayer.play(context, channel, chooser = true) }
+                    }
+                    val isFavourite = channel.favourite
+                    RecordActionRow(
+                        stringResource(if (isFavourite) R.string.guide_remove_favourite else R.string.guide_add_favourite),
+                    ) {
+                        channelMenu = null
+                        viewModel.toggleFavourite(menuRow)
+                        Toast.makeText(
+                            context,
+                            context.getString(
+                                if (isFavourite) R.string.guide_favourite_removed else R.string.guide_favourite_added,
+                                menuRow.shownName,
+                            ),
+                            Toast.LENGTH_SHORT,
+                        ).show()
                     }
                     if (recordingThis != null) {
                         RecordActionRow(stringResource(R.string.rec_stop_recording), primary = true) {
@@ -754,7 +778,7 @@ fun HomeScreen(
                     } else {
                         RecordActionRow(stringResource(R.string.guide_record_now_playing), primary = true) {
                             recordScope.launch { graph.recordingEngine.startChannel(channel, nowProg) }
-                            Toast.makeText(context, context.getString(R.string.rec_recording_started_see_tab, channel.shownName), Toast.LENGTH_LONG).show()
+                            Toast.makeText(context, context.getString(R.string.rec_recording_started_see_tab, menuRow.shownName), Toast.LENGTH_LONG).show()
                             promptBackgroundIfNeeded()
                             channelMenu = null
                         }
@@ -884,8 +908,15 @@ private fun QualityChip(label: String, selected: Boolean, onClick: () -> Unit) {
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun RailEntry(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun RailEntry(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    onLongClick: (() -> Unit)? = null,
+) {
     Text(
         text = label,
         style = MaterialTheme.typography.titleMedium,
@@ -901,7 +932,7 @@ private fun RailEntry(label: String, selected: Boolean, onClick: () -> Unit, mod
                 if (selected) MaterialTheme.colorScheme.primaryContainer
                 else MaterialTheme.colorScheme.surface,
             )
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 12.dp, vertical = 10.dp),
     )
 }
@@ -940,7 +971,7 @@ private fun ChannelRow(
             // Logo, name, guide — and nothing else. Quality is a playback decision;
             // its switch lives in the player, not as clutter on every row.
             Text(
-                row.primary.shownName,
+                row.shownName,
                 style = MaterialTheme.typography.titleMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
