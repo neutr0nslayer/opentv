@@ -26,7 +26,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -42,6 +44,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
@@ -91,6 +95,9 @@ fun GuideGrid(
     // left-navigation carry focus into the already-visible rail.
     onExitLeftFromChannel: () -> Boolean = { false },
     dayOffset: Int = 0,
+    listState: LazyListState = rememberLazyListState(),
+    /** Attached to the [selectedKey] row's channel cell, so the host can put d-pad focus on it. */
+    focusRequester: FocusRequester? = null,
     modifier: Modifier = Modifier,
 ) {
     val scroll = rememberScrollState()
@@ -105,6 +112,7 @@ fun GuideGrid(
         TimeHeader(windowStartMillis, scroll)
 
         LazyColumn(
+            state = listState,
             contentPadding = PaddingValues(bottom = 16.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
@@ -120,6 +128,7 @@ fun GuideGrid(
                     onProgramme = { programme -> onProgramme(row, programme) },
                     onLongPress = { onLongPressRow(row) },
                     onExitLeft = onExitLeftFromChannel,
+                    focusRequester = focusRequester.takeIf { row.key == selectedKey },
                 )
             }
         }
@@ -142,10 +151,14 @@ fun ChannelList(
     /** Long-press / hold OK on a row — opens the channel menu. */
     onLongPressRow: (ChannelsViewModel.Row) -> Unit = {},
     onExitLeftFromChannel: () -> Boolean = { false },
+    listState: LazyListState = rememberLazyListState(),
+    /** Attached to the [selectedKey] row, so the host can put d-pad focus on it. */
+    focusRequester: FocusRequester? = null,
     modifier: Modifier = Modifier,
 ) {
     val now = System.currentTimeMillis()
     LazyColumn(
+        state = listState,
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(3.dp),
@@ -159,6 +172,7 @@ fun ChannelList(
                 onFocus = { onFocusRow(row) },
                 onLongPress = { onLongPressRow(row) },
                 onExitLeft = onExitLeftFromChannel,
+                focusRequester = focusRequester.takeIf { row.key == selectedKey },
             )
         }
     }
@@ -173,11 +187,13 @@ private fun ChannelListRow(
     onFocus: () -> Unit,
     onLongPress: () -> Unit,
     onExitLeft: () -> Boolean,
+    focusRequester: FocusRequester? = null,
 ) {
     var focused by remember { mutableStateOf(false) }
     Row(
         Modifier
             .fillMaxWidth()
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .background(
                 if (isSelected) MaterialTheme.colorScheme.primaryContainer
                 else MaterialTheme.colorScheme.surface,
@@ -325,6 +341,7 @@ private fun GuideRow(
     onProgramme: (Programme) -> Unit,
     onLongPress: () -> Unit = {},
     onExitLeft: () -> Boolean = { false },
+    focusRequester: FocusRequester? = null,
 ) {
     // Focus (the d-pad border) just moves the highlight. Selection (the filled cell) is the
     // channel the preview is playing — it only changes when you press OK.
@@ -337,6 +354,7 @@ private fun GuideRow(
             Modifier
                 .width(CHANNEL_COLUMN)
                 .fillMaxSize()
+                .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
                 .background(
                     if (isSelected) MaterialTheme.colorScheme.primaryContainer
                     else MaterialTheme.colorScheme.surface,
